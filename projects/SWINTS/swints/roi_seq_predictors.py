@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-
+import Levenshtein
 gpu_device = torch.device("cuda")
 cpu_device = torch.device("cpu")
 
@@ -31,7 +31,7 @@ def num2char(num):
 
 # TODO
 class SequencePredictor(nn.Module):
-    def __init__(self,cfg, dim_in ):
+    def __init__(self,cfg, dim_in , lexicon=None):
         super(SequencePredictor, self).__init__()
         self.seq_encoder = nn.Sequential(
             nn.Conv2d(dim_in, dim_in, 3, padding=1),
@@ -39,6 +39,7 @@ class SequencePredictor(nn.Module):
             nn.MaxPool2d(2, stride=2, ceil_mode=True),
         )
         self.MAX_LENGTH = 100
+        self.lexicon = lexicon
         RESIZE_WIDTH = cfg.MODEL.REC_HEAD.RESOLUTION[1]
         RESIZE_HEIGHT = cfg.MODEL.REC_HEAD.RESOLUTION[0]
         self.RESIZE_WIDTH = RESIZE_WIDTH
@@ -218,6 +219,10 @@ class SequencePredictor(nn.Module):
                     tmp[:len(word)] = torch.tensor(word)
                     word = tmp
                     words.append(word)
+                    if self.lexicon:
+                        word_str = "".join([num2char(c) for c in word if c > 0])
+                        word_str = self.find_closest_in_lexicon(word_str)
+                        words[-1] = word_str
                     decoded_scores.append(char_scores)
             return words
 
@@ -269,6 +274,10 @@ class SequencePredictor(nn.Module):
             if all_done:
                 break
         return top_seqs
+    def find_closest_in_lexicon(self, pred_str):
+        distances = [Levenshtein.distance(pred_str, word) for word in self.lexicon]
+        min_idx = int(np.argmin(distances))
+        return self.lexicon[min_idx]
 
 
 class Attn(nn.Module):
@@ -379,4 +388,7 @@ class BahdanauAttnDecoderRNN(nn.Module):
 
 
 def make_roi_seq_predictor(cfg, dim_in):
-    return SequencePredictor(cfg, dim_in)
+    dict_path = cfg.SEQUENCE.DICTIONARY_PATH
+    with open(dict_path, 'r', encoding='utf-8') as f:
+        lexicon = [line.strip() for line in f.readlines()]
+    return SequencePredictor(cfg, dim_in, lexicon=lexicon)
