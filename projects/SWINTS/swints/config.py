@@ -65,15 +65,15 @@ def add_SWINTS_config(cfg):
     cfg.MODEL.SWINTS.PATH_COMPONENTS = "./projects/SWINTS/LME/coco_2017_train_class_agnosticTrue_whitenTrue_sigmoidTrue_60_siz28.npz"
     
     # SWINT backbone
-    cfg.MODEL.SWINT = CN()
-    cfg.MODEL.SWINT.EMBED_DIM = 96
-    cfg.MODEL.SWINT.OUT_FEATURES = ["stage2", "stage3", "stage4", "stage5"]
-    cfg.MODEL.SWINT.DEPTHS = [2, 2, 6, 2]
-    cfg.MODEL.SWINT.NUM_HEADS = [3, 6, 12, 24]
-    cfg.MODEL.SWINT.WINDOW_SIZE = 7
-    cfg.MODEL.SWINT.MLP_RATIO = 4
-    cfg.MODEL.SWINT.DROP_PATH_RATE = 0.2
-    cfg.MODEL.SWINT.APE = False
+    cfg.MODEL.SWINTS = CN()
+    cfg.MODEL.SWINTS.EMBED_DIM = 96
+    cfg.MODEL.SWINTS.OUT_FEATURES = ["stage2", "stage3", "stage4", "stage5"]
+    cfg.MODEL.SWINTS.DEPTHS = [2, 2, 6, 2]
+    cfg.MODEL.SWINTS.NUM_HEADS = [3, 6, 12, 24]
+    cfg.MODEL.SWINTS.WINDOW_SIZE = 7
+    cfg.MODEL.SWINTS.MLP_RATIO = 4
+    cfg.MODEL.SWINTS.DROP_PATH_RATE = 0.2
+    cfg.MODEL.SWINTS.APE = False
     cfg.MODEL.BACKBONE.FREEZE_AT = -1
 
     # addation
