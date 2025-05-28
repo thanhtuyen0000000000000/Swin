@@ -6,6 +6,7 @@ def add_SWINTS_config(cfg):
     Add config for SWINTS.
     """
     cfg.MODEL.SWINTS = CN()
+    cfg.MODEL.SWINTS.USE_DICTIONARY = True
     cfg.MODEL.SWINTS.NUM_CLASSES = 80
     cfg.MODEL.SWINTS.NUM_PROPOSALS = 300
     cfg.MODEL.SWINTS.TEST_NUM_PROPOSALS = 100
