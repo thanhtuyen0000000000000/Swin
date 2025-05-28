@@ -30,8 +30,8 @@ def add_SWINTS_config(cfg):
     cfg.MODEL.SWINTS.DIM_DYNAMIC = 64
 
     # Recognition Head
-    cfg.SEQUENCE = CN()
-    cfg.SEQUENCE.DICTIONARY_PATH = "./vn_dictionary.txt"
+    
+    cfg.MODEL.SWINTS.DICT_PATH = "./vn_dictionary.txt"
     cfg.MODEL.REC_HEAD = CN()
     cfg.MODEL.REC_HEAD.BATCH_SIZE = 48
     cfg.MODEL.REC_HEAD.POOLER_RESOLUTION = (28,28)

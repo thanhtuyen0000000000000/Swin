@@ -389,7 +389,7 @@ class BahdanauAttnDecoderRNN(nn.Module):
 
 
 def make_roi_seq_predictor(cfg, dim_in):
-    dict_path = cfg.SEQUENCE.DICTIONARY_PATH
+    dict_path = cfg.MODEL.SWINTS.DICT_PATH 
     with open(dict_path, 'r', encoding='utf-8') as f:
         lexicon = [line.strip() for line in f.readlines()]
     return SequencePredictor(cfg, dim_in, lexicon=lexicon)
