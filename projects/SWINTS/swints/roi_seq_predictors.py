@@ -6,7 +6,8 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-import Levenshtein
+
+from rapidfuzz import process, fuzz
 gpu_device = torch.device("cuda")
 cpu_device = torch.device("cpu")
 
@@ -25,9 +26,17 @@ def check_all_done(seqs):
     return True
 
 def num2char(num):
-    CTLABELS = [' ','!','"','#','$','%','&','\'','(',')','*','+',',','-','.','/','0','1','2','3','4','5','6','7','8','9',':',';','<','=','>','?','@','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','[','\\',']','^','_','`','a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z','{','|','}','~','´', "~", "ˋ", "ˊ","﹒", "ˀ", "˜", "ˇ", "ˆ", "˒","‑"]
-    char = chars[num]
-    return char
+    CTLABELS = [' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/', 
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?', '@', 
+            'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 
+            'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[', '\\', ']', '^', '_', '`', 
+            'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 
+            'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '{', '|', '}', '~', 'á', 'à', 'ả', 'ã', 
+            'ạ', 'ă', 'ắ', 'ằ', 'ẳ', 'ẵ', 'ặ', 'â', 'ấ', 'ầ', 'ẩ', 'ẫ', 'ậ', 'đ', 'é', 'è', 'ẻ', 
+            'ẽ', 'ẹ', 'ê', 'ế', 'ề', 'ể', 'ễ', 'ệ', 'í', 'ì', 'ỉ', 'ĩ', 'ị', 'ó', 'ò', 'ỏ', 'õ', 
+            'ọ', 'ô', 'ố', 'ồ', 'ổ', 'ỗ', 'ộ', 'ơ', 'ớ', 'ờ', 'ở', 'ỡ', 'ợ', 'ú', 'ù', 'ủ', 'ũ', 
+            'ụ', 'ư', 'ứ', 'ừ', 'ử', 'ữ', 'ự', 'ý', 'ỳ', 'ỷ', 'ỹ', 'ỵ']
+    return CTLABELS[num]
 
 # TODO
 class SequencePredictor(nn.Module):
@@ -40,6 +49,8 @@ class SequencePredictor(nn.Module):
         )
         self.MAX_LENGTH = 100
         self.lexicon = lexicon
+        self.lexicon_cache = {}
+        self.distance_threshold = cfg.MODEL.REC_HEAD.LEXICON_THRESHOLD / 100.0 if hasattr(cfg.MODEL.REC_HEAD, 'LEXICON_THRESHOLD') else 0.7
         RESIZE_WIDTH = cfg.MODEL.REC_HEAD.RESOLUTION[1]
         RESIZE_HEIGHT = cfg.MODEL.REC_HEAD.RESOLUTION[0]
         self.RESIZE_WIDTH = RESIZE_WIDTH
@@ -68,9 +79,7 @@ class SequencePredictor(nn.Module):
                 # corresponds to kaiming_normal_ in PyTorch
                 nn.init.kaiming_normal_(param, mode="fan_out", nonlinearity="relu")
 
-    def forward(
-        self, x, decoder_targets=None, word_targets=None, use_beam_search=False
-    ):
+    def forward(self, x, decoder_targets=None, word_targets=None, use_beam_search=False):
         rescale_out = self.rescale(x)
         seq_decoder_input = self.seq_encoder(rescale_out)
         x_onehot_size = int(self.RESIZE_WIDTH / 2)
@@ -79,83 +88,68 @@ class SequencePredictor(nn.Module):
         x_t = torch.LongTensor(x_t, device=cpu_device).cuda()
         y_t = torch.LongTensor(y_t, device=cpu_device).cuda()
         x_onehot_embedding = (
-            self.x_onehot(x_t)
-            .transpose(0, 2)
-            .transpose(1, 2)
-            .repeat(seq_decoder_input.size(0), 1, 1, 1)
+            self.x_onehot(x_t).transpose(0, 2).transpose(1, 2).repeat(seq_decoder_input.size(0), 1, 1, 1)
         )
         y_onehot_embedding = (
-            self.y_onehot(y_t)
-            .transpose(0, 2)
-            .transpose(1, 2)
-            .repeat(seq_decoder_input.size(0), 1, 1, 1)
+            self.y_onehot(y_t).transpose(0, 2).transpose(1, 2).repeat(seq_decoder_input.size(0), 1, 1, 1)
         )
-        seq_decoder_input_loc = torch.cat(
-            [seq_decoder_input, x_onehot_embedding, y_onehot_embedding], 1
-        )
+        seq_decoder_input_loc = torch.cat([seq_decoder_input, x_onehot_embedding, y_onehot_embedding], 1)
         seq_decoder_input_reshape = (
-            seq_decoder_input_loc.view(
-                seq_decoder_input_loc.size(0), seq_decoder_input_loc.size(1), -1
-            )
+            seq_decoder_input_loc.view(seq_decoder_input_loc.size(0), seq_decoder_input_loc.size(1), -1)
             .transpose(0, 2)
             .transpose(1, 2)
         )
         if self.training:
-            bos_onehot = np.zeros(
-                (seq_decoder_input_reshape.size(1), 1), dtype=np.int32
-            )
+            if decoder_targets is None or word_targets is None or word_targets.size(0) == 0:
+                return {'loss_rec': torch.tensor(0.0, device=gpu_device), 'pred_texts': []}
+            bos_onehot = np.zeros((seq_decoder_input_reshape.size(1), 1), dtype=np.int32)
             bos_onehot[:, 0] = 0
             decoder_input = torch.tensor(bos_onehot.tolist(), device=gpu_device)
-            decoder_hidden = torch.zeros(
-                (seq_decoder_input_reshape.size(1), 256), device=gpu_device
-            )
-            use_teacher_forcing = (
-                True
-                if random.random() < 1
-                else False
-            )
+            decoder_hidden = torch.zeros((seq_decoder_input_reshape.size(1), 256), device=gpu_device)
+            use_teacher_forcing = True if random.random() < 0.5 else False
             target_length = decoder_targets.size(1)
             if use_teacher_forcing:
-                # Teacher forcing: Feed the target as the next input
                 for di in range(target_length):
                     decoder_output, decoder_hidden, decoder_attention = self.seq_decoder(
                         decoder_input, decoder_hidden, seq_decoder_input_reshape
                     )
                     if di == 0:
-                        loss_seq_decoder = self.criterion_seq_decoder(
-                            decoder_output, word_targets[:, di]
-                        )
+                        loss_seq_decoder = self.criterion_seq_decoder(decoder_output, word_targets[:, di])
                     else:
-                        loss_seq_decoder += self.criterion_seq_decoder(
-                            decoder_output, word_targets[:, di]
-                        )
-                    decoder_input = decoder_targets[:, di]  # Teacher forcing
+                        loss_seq_decoder += self.criterion_seq_decoder(decoder_output, word_targets[:, di])
+                    decoder_input = decoder_targets[:, di]
+                # Tạo pred_texts từ word_targets
+                for i in range(word_targets.size(0)):
+                    word_str = "".join([num2char(c.item()) for c in word_targets[i] if c.item() > 0])
+                    words.append(word_str)
             else:
-                # Without teacher forcing: use its own predictions as the next input
-                for di in range(target_length):
-                    decoder_output, decoder_hidden, decoder_attention = self.seq_decoder(
-                        decoder_input, decoder_hidden, seq_decoder_input_reshape
+                words = []
+                for batch_index in range(seq_decoder_input_reshape.size(1)):
+                    top_seqs = self.beam_search(
+                        seq_decoder_input_reshape[:, batch_index:batch_index+1, :],
+                        decoder_hidden[batch_index:batch_index+1],
+                        beam_size=6,
+                        max_len=self.MAX_LENGTH
                     )
-                    topv, topi = decoder_output.topk(1)
-                    decoder_input = topi.squeeze(
-                        1
-                    ).detach()  # detach from history as input
-                    if di == 0:
-                        loss_seq_decoder = self.criterion_seq_decoder(
-                            decoder_output, word_targets[:, di]
-                        )
-                    else:
-                        loss_seq_decoder += self.criterion_seq_decoder(
-                            decoder_output, word_targets[:, di]
-                        )
+                    top_seq = top_seqs[0]
+                    word = []
+                    for character in top_seq[1:]:
+                        character_index = character[0]
+                        if character_index == self.num_class:
+                            break
+                        word.append(character_index)
+                    word_str = "".join([num2char(c) for c in word if c > 0])
+                    if self.lexicon:
+                        word_str = self.find_closest_in_lexicon(word_str)
+                    words.append(word_str)
+                loss_seq_decoder = self.compute_lexicon_guided_loss(words, word_targets)
             loss_seq_decoder = loss_seq_decoder.sum() / loss_seq_decoder.size(0)
             loss_seq_decoder = 0.2 * loss_seq_decoder
-            return loss_seq_decoder
+            return {'loss_rec': loss_seq_decoder, 'pred_texts': words}
         else:
             words = []
             decoded_scores = []
             detailed_decoded_scores = []
-            # real_length = 0
             if use_beam_search:
                 for batch_index in range(seq_decoder_input_reshape.size(1)):
                     decoder_hidden = torch.zeros((1, 256), device=gpu_device)
@@ -163,7 +157,7 @@ class SequencePredictor(nn.Module):
                     char_scores = []
                     detailed_char_scores = []
                     top_seqs = self.beam_search(
-                        seq_decoder_input_reshape[:, batch_index : batch_index + 1, :],
+                        seq_decoder_input_reshape[:, batch_index:batch_index+1, :],
                         decoder_hidden,
                         beam_size=6,
                         max_len=self.MAX_LENGTH,
@@ -171,19 +165,18 @@ class SequencePredictor(nn.Module):
                     top_seq = top_seqs[0]
                     for character in top_seq[1:]:
                         character_index = character[0]
-                        if character_index == self.cfg.SEQUENCE.NUM_CHAR:
+                        if character_index == self.num_class:
                             char_scores.append(character[1])
                             detailed_char_scores.append(character[2])
                             break
                         else:
-                            if character_index == 0:
-                                word.append("~")
-                                char_scores.append(0.0)
-                            else:
-                                word.append(num2char(character_index))
-                                char_scores.append(character[1])
-                                detailed_char_scores.append(character[2])
-                    words.append("".join(word))
+                            word.append(num2char(character_index))
+                            char_scores.append(character[1])
+                            detailed_char_scores.append(character[2])
+                    word_str = "".join(word)
+                    if self.lexicon:
+                        word_str = self.find_closest_in_lexicon(word_str)
+                    words.append(word_str)
                     decoded_scores.append(char_scores)
                     detailed_decoded_scores.append(detailed_char_scores)
             else:
@@ -198,39 +191,34 @@ class SequencePredictor(nn.Module):
                         decoder_output, decoder_hidden, decoder_attention = self.seq_decoder(
                             decoder_input,
                             decoder_hidden,
-                            seq_decoder_input_reshape[
-                                :, batch_index : batch_index + 1, :
-                            ],
+                            seq_decoder_input_reshape[:, batch_index:batch_index+1, :],
                         )
-                        # decoder_attentions[di] = decoder_attention.data
                         topv, topi = decoder_output.data.topk(1)
                         char_scores.append(topv.item())
-                        if topi.item() == 0:
+                        if topi.item() == self.num_class:
                             break
-                        else:
-                            if topi.item() == 0:
-                                word.append(topi.item())
-                            else:
-                                word.append(topi.item())
-
-                        # real_length = di
+                        word.append(num2char(topi.item()))
                         decoder_input = topi.squeeze(1).detach()
-                    tmp = np.zeros((self.MAX_LENGTH), dtype=np.int32)
-                    tmp[:len(word)] = torch.tensor(word)
-                    word = tmp
-                    words.append(word)
+                    word_str = "".join(word)
                     if self.lexicon:
-                        word_str = "".join([num2char(c) for c in word if c > 0])
                         word_str = self.find_closest_in_lexicon(word_str)
-                        words[-1] = word_str
+                    words.append(word_str)
                     decoded_scores.append(char_scores)
-            return words
+            return {'pred_texts': words, 'scores': decoded_scores, 'detailed_scores': detailed_decoded_scores}
+        
+    def compute_lexicon_guided_loss(self, predicted_words, word_targets):
+        loss = torch.zeros(word_targets.size(0), device=gpu_device)
+        for i, pred_word in enumerate(predicted_words):
+            target = "".join([num2char(c.item()) for c in word_targets[i] if c.item() > 0])
+            result = process.extractOne(pred_word, [target], scorer=fuzz.ratio)
+            loss[i] = 1.0 - result[1] / 100.0
+        return loss
 
     def beam_search_step(self, encoder_context, top_seqs, k):
         all_seqs = []
         for seq in top_seqs:
             seq_score = reduce_mul([_score for _, _score, _, _ in seq])
-            if seq[-1][0] == self.cfg.SEQUENCE.NUM_CHAR - 1:
+            if seq[-1][0] == self.num_class:
                 all_seqs.append((seq, seq_score, seq[-1][2], True))
                 continue
             decoder_hidden = seq[-1][-1][0]
@@ -241,12 +229,22 @@ class SequencePredictor(nn.Module):
                 decoder_input, decoder_hidden, encoder_context
             )
             detailed_char_scores = decoder_output.cpu().numpy()
-            # print(decoder_output.shape)
             scores, candidates = decoder_output.data[:, 1:].topk(k)
+            
+            current_word = "".join([num2char(c) for c, _, _, _ in seq[1:] if c > 0])
             for i in range(k):
                 character_score = scores[:, i]
                 character_index = candidates[:, i]
-                score = seq_score * character_score.item()
+                char = num2char(character_index.item() + 1) if character_index.item() + 1 != self.num_class else ""
+                new_word = current_word + char
+                
+                score_boost = 1.0
+                if self.lexicon and new_word:
+                    closest_match = process.extractOne(new_word, self.lexicon, scorer=fuzz.ratio)
+                    if closest_match[1] / 100.0 >= self.distance_threshold:
+                        score_boost = 1.0 + (closest_match[1] / 100.0) * 0.5
+                
+                score = seq_score * character_score.item() * score_boost
                 char_score = seq_score * detailed_char_scores
                 rs_seq = seq + [
                     (
@@ -256,28 +254,31 @@ class SequencePredictor(nn.Module):
                         [decoder_hidden],
                     )
                 ]
-                done = character_index.item() + 1 == 38
+                done = character_index.item() + 1 == self.num_class
                 all_seqs.append((rs_seq, score, char_score, done))
+        
         all_seqs = sorted(all_seqs, key=lambda seq: seq[1], reverse=True)
         topk_seqs = [seq for seq, _, _, _ in all_seqs[:k]]
         all_done = check_all_done(all_seqs[:k])
         return topk_seqs, all_done
 
     def beam_search(self, encoder_context, decoder_hidden, beam_size=6, max_len=32):
-        char_score = np.zeros(self.cfg.SEQUENCE.NUM_CHAR)
-        top_seqs = [[(self.cfg.SEQUENCE.BOS_TOKEN, 1.0, char_score, [decoder_hidden])]]
-        # loop
+        char_score = np.zeros(self.num_class)  # Sửa NUM_CHAR thành num_class
+        top_seqs = [[(0, 1.0, char_score, [decoder_hidden])]]  # BOS_TOKEN = 0
         for _ in range(max_len):
-            top_seqs, all_done = self.beam_search_step(
-                encoder_context, top_seqs, beam_size
-            )
+            top_seqs, all_done = self.beam_search_step(encoder_context, top_seqs, beam_size)
             if all_done:
                 break
         return top_seqs
     def find_closest_in_lexicon(self, pred_str):
-        distances = [Levenshtein.distance(pred_str, word) for word in self.lexicon]
-        min_idx = int(np.argmin(distances))
-        return self.lexicon[min_idx]
+        if not pred_str or not self.lexicon:
+            return pred_str
+        if pred_str in self.lexicon_cache:
+            return self.lexicon_cache[pred_str]
+        result = process.extractOne(pred_str, self.lexicon, scorer=fuzz.ratio)
+        output = result[0] if result[1] / 100.0 >= self.distance_threshold else pred_str
+        self.lexicon_cache[pred_str] = output
+        return output
 
 
 class Attn(nn.Module):

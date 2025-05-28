@@ -103,6 +103,7 @@ class SWINTS(nn.Module):
         no_object_weight = cfg.MODEL.SWINTS.NO_OBJECT_WEIGHT
         mask_weight = cfg.MODEL.SWINTS.MASK_WEIGHT
 
+        
         self.deep_supervision = cfg.MODEL.SWINTS.DEEP_SUPERVISION
 
         # Build Criterion.
@@ -112,11 +113,19 @@ class SWINTS(nn.Module):
                                    cost_giou=giou_weight,
                                    cost_mask=mask_weight)
         self.matcher = matcher
-        weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight, "loss_feat": mask_weight, "loss_dice": mask_weight}
+        weight_dict = {
+        "loss_ce": class_weight,
+        "loss_bbox": l1_weight,
+        "loss_giou": giou_weight,
+        "loss_feat": mask_weight,
+        "loss_dice": mask_weight,
+        "loss_rec": rec_weight,
+        "loss_lexicon": rec_weight * 0.5  # Thêm trọng số cho lexicon, ví dụ: 1/2 trọng số của loss_rec
+    }
         if self.deep_supervision:
             aux_weight_dict = {}
             for i in range(self.num_heads - 1):
-                aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
+                aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items() if k not in ["loss_rec", "loss_lexicon"]})
             weight_dict.update(aux_weight_dict)
         weight_dict["loss_rec"] = rec_weight
         losses = ["labels", "boxes", "masks", "rec"]
@@ -175,11 +184,21 @@ class SWINTS(nn.Module):
         if self.training:
             gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
             targets = self.prepare_targets(gt_instances)
-            outputs_class, outputs_coord, outputs_mask,out_rec = self.head(features, proposal_boxes, proposal_feats, targets, mask_encoding=self.mask_encoding, matcher=self.matcher)
-            output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_masks': outputs_mask[-1], 'pred_rec': out_rec}
+            outputs_class, outputs_coord, outputs_mask, out_rec, pred_texts = self.head(
+                features, proposal_boxes, proposal_feats, targets, mask_encoding=self.mask_encoding, matcher=self.matcher
+            )
+            output = {
+                'pred_logits': outputs_class[-1],
+                'pred_boxes': outputs_coord[-1],
+                'pred_masks': outputs_mask[-1],
+                'pred_rec': out_rec,
+                'pred_texts': pred_texts  # Thêm pred_texts
+            }
             if self.deep_supervision:
-                output['aux_outputs'] = [{'pred_logits': a, 'pred_boxes': b, 'pred_masks': c}
-                                         for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_mask[:-1])]
+                output['aux_outputs'] = [
+                    {'pred_logits': a, 'pred_boxes': b, 'pred_masks': c}
+                    for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_mask[:-1])
+                ]
 
             loss_dict = self.criterion(output, targets, self.mask_encoding)
             weight_dict = self.criterion.weight_dict
@@ -189,17 +208,25 @@ class SWINTS(nn.Module):
             return loss_dict
 
         else:
-            outputs_class, outputs_coord, outputs_mask,out_rec = self.head(features, proposal_boxes, proposal_feats, mask_encoding=self.mask_encoding)
-            output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_masks': outputs_mask[-1]}
+            outputs_class, outputs_coord, outputs_mask, out_rec, pred_texts = self.head(
+                features, proposal_boxes, proposal_feats, mask_encoding=self.mask_encoding
+            )
+            output = {
+                'pred_logits': outputs_class[-1],
+                'pred_boxes': outputs_coord[-1],
+                'pred_masks': outputs_mask[-1]
+            }
             box_cls = output["pred_logits"]
             box_pred = output["pred_boxes"]
             mask_pred = output["pred_masks"].unsqueeze(dim=2)
-            results = Instances(images.image_sizes[0])
-            results.pred_boxes = Boxes(box_pred)
-            results.scores = box_cls
-            results.pred_masks = mask_pred.squeeze(1)
-            results.pred_rec = out_rec
-            results = [results]
+            # results = Instances(images.image_sizes[0])
+            # results.pred_boxes = Boxes(box_pred)
+            # results.scores = box_cls
+            # results.pred_masks = mask_pred.squeeze(1)
+            # results.pred_rec = out_rec
+            # results.pred_texts = pred_texts  # Thêm pred_texts vào kết quả
+            # results = [results]
+            results = self.inference(box_cls, box_pred, mask_pred, images.image_sizes, out_rec, pred_texts)
             processed_results = []
             for results_per_image, input_per_image, image_size in zip(results, batched_inputs, images.image_sizes):
                 height = input_per_image.get("height", image_size[0])
@@ -231,32 +258,25 @@ class SWINTS(nn.Module):
             masks = target['gt_masks'].crop_and_resize(targets_per_image.gt_boxes, 28)
             target["gt_masks"] = masks.float()
             target["rec"] = targets_per_image.rec.to(self.device)
+                # Thêm lexicon nếu có
+            if hasattr(targets_per_image, "lexicon"):
+                target["lexicon"] = targets_per_image.lexicon
+            else:
+                target["lexicon"] = []  # Nếu không có lexicon, để rỗng
             new_targets.append(target)
+            
 
         return new_targets
 
     @torch.no_grad()
-    def inference(self, box_cls, box_pred, mask_pred, image_sizes, recred):
-        """
-        Arguments:
-            box_cls (Tensor): tensor of shape (batch_size, num_proposals, K).
-                The tensor predicts the classification probability for each proposal.
-            box_pred (Tensor): tensors of shape (batch_size, num_proposals, 4).
-                The tensor predicts 4-vector (x,y,w,h) box
-                regression values for every proposal
-            image_sizes (List[torch.Size]): the input image sizes
-
-        Returns:
-            results (List[Instances]): a list of #images elements.
-        """
+    def inference(self, box_cls, box_pred, mask_pred, image_sizes, rec_pred, pred_texts):
         assert len(box_cls) == len(image_sizes)
         results = []
-        #
         scores = torch.sigmoid(box_cls)
         labels = torch.arange(self.num_classes, device=self.device).\
-                 unsqueeze(0).repeat(self.num_proposals, 1).flatten(0, 1)
-        for i, (scores_per_image, box_pred_per_image, mask_pred_per_image, image_size, rec_per_image) in enumerate(zip(
-                scores, box_pred, mask_pred, image_sizes, rec_pred
+                unsqueeze(0).repeat(self.num_proposals, 1).flatten(0, 1)
+        for i, (scores_per_image, box_pred_per_image, mask_pred_per_image, image_size, rec_per_image, texts_per_image) in enumerate(zip(
+                scores, box_pred, mask_pred, image_sizes, rec_pred, pred_texts
         )):
             result = Instances(image_size)
             scores_per_image, topk_indices = scores_per_image.flatten(0, 1).topk(self.num_proposals, sorted=False)
@@ -266,6 +286,7 @@ class SWINTS(nn.Module):
             result.pred_classes = labels_per_image
             result.pred_masks = mask_pred_per_image
             result.pred_rec = rec_per_image
+            result.pred_texts = [texts_per_image[idx] for idx in topk_indices]  # Lấy pred_texts tương ứng
             results.append(result)
         return results
 

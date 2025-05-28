@@ -29,13 +29,16 @@ def add_SWINTS_config(cfg):
     cfg.MODEL.SWINTS.DIM_DYNAMIC = 64
 
     # Recognition Head
+    cfg.SEQUENCE.DICTIONARY_PATH = "./vn_dictionary.py"
     cfg.MODEL.REC_HEAD = CN()
     cfg.MODEL.REC_HEAD.BATCH_SIZE = 48
     cfg.MODEL.REC_HEAD.POOLER_RESOLUTION = (28,28)
     cfg.MODEL.REC_HEAD.RESOLUTION = (32, 32)
-    cfg.MODEL.REC_HEAD.NUM_CLASSES = 107
+    cfg.MODEL.REC_HEAD.LEXICON_THRESHOLD = 0.7
+    cfg.MODEL.REC_HEAD.NUM_CLASSES = 128
 
     # Loss.
+    
     cfg.MODEL.SWINTS.CLASS_WEIGHT = 2.0
     cfg.MODEL.SWINTS.GIOU_WEIGHT = 2.0
     cfg.MODEL.SWINTS.L1_WEIGHT = 5.0
@@ -44,6 +47,7 @@ def add_SWINTS_config(cfg):
     cfg.MODEL.SWINTS.NO_OBJECT_WEIGHT = 0.1
     cfg.MODEL.SWINTS.MASK_WEIGHT = 2.0
 
+    
     # Focal Loss.
     cfg.MODEL.SWINTS.ALPHA = 0.25
     cfg.MODEL.SWINTS.GAMMA = 2.0
